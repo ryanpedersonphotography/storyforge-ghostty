@@ -1,0 +1,31 @@
+# StoryForge Studio's private Ghostty profile.
+#
+# This file is loaded directly from the app bundle. It intentionally does not
+# read ~/.config/ghostty or the configuration used by the user's Ghostty app.
+
+title = StoryForge Studio
+font-size = 16
+
+background = 101217
+foreground = E8E4DC
+cursor-color = C7A0FF
+selection-background = 3B3254
+selection-foreground = F7F2FF
+minimum-contrast = 1.2
+
+window-padding-x = 10
+window-padding-y = 8
+window-padding-balance = true
+window-padding-color = background
+window-save-state = never
+window-inherit-working-directory = false
+quit-after-last-window-closed = true
+confirm-close-surface = false
+mouse-hide-while-typing = true
+
+macos-titlebar-style = transparent
+macos-titlebar-proxy-icon = hidden
+macos-applescript = false
+auto-update = off
+shell-integration = none
+

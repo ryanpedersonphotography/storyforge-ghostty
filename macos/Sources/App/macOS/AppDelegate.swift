@@ -161,12 +161,20 @@ class AppDelegate: NSObject,
     /// If multiple items map to the same shortcut, the most recent one wins.
     private var menuItemsByShortcut: [MenuShortcutKey: Weak<NSMenuItem>] = [:]
 
+    /// StoryForge owns this Ghostty build, so it always reads the immutable
+    /// configuration shipped inside the application bundle instead of the
+    /// user's normal Ghostty configuration.
+    private static var storyForgeConfigPath: String {
+        let resources = Bundle.main.resourceURL ?? URL(fileURLWithPath: "/dev")
+        return resources
+            .appendingPathComponent("storyforge", isDirectory: true)
+            .appendingPathComponent("config.ghostty", isDirectory: false)
+            .path
+    }
+
     override init() {
-#if DEBUG
-        ghostty = Ghostty.App(configPath: ProcessInfo.processInfo.environment["GHOSTTY_CONFIG_PATH"])
-#else
-        ghostty = Ghostty.App()
-#endif
+        let override = ProcessInfo.processInfo.environment["GHOSTTY_CONFIG_PATH"]
+        ghostty = Ghostty.App(configPath: override ?? Self.storyForgeConfigPath)
         super.init()
 
         ghostty.delegate = self
@@ -218,8 +226,11 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // Start our update checker.
-        updateController.startUpdater()
+        // This downstream engine is updated only when StoryForge deliberately
+        // advances its pinned Ghostty revision. Never contact Ghostty's Sparkle
+        // feed or replace the app-specific build underneath StoryForge.
+        updateController.updater.automaticallyChecksForUpdates = false
+        updateController.updater.automaticallyDownloadsUpdates = false
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
@@ -311,6 +322,12 @@ class AppDelegate: NSObject,
 
         // Setup our menu
         setupMenuImages()
+        menuCheckForUpdates?.isHidden = true
+        menuOpenConfig?.isHidden = true
+        menuReloadConfig?.isHidden = true
+        menuSetAsDefaultTerminal?.isHidden = true
+        menuUseAsDefault?.isHidden = true
+        menuQuickTerminal?.isHidden = true
 
         // Setup signal handlers
         setupSignals()
@@ -358,7 +375,10 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                _ = TerminalController.newWindow(
+                    ghostty,
+                    withBaseConfig: storyForgeSurfaceConfiguration()
+                )
                 undoManager.enableUndoRegistration()
             }
         }
@@ -452,7 +472,10 @@ class AppDelegate: NSObject,
         guard applicationHasBecomeActive else { return true }
 
         // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        _ = TerminalController.newWindow(
+            ghostty,
+            withBaseConfig: storyForgeSurfaceConfiguration()
+        )
         return false
     }
 
@@ -720,7 +743,10 @@ class AppDelegate: NSObject,
     @objc private func ghosttyNewWindow(_ notification: Notification) {
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
-        _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
+        _ = TerminalController.newWindow(
+            ghostty,
+            withBaseConfig: storyForgeSurfaceConfiguration(config)
+        )
     }
 
     @objc private func ghosttyNewTab(_ notification: Notification) {
@@ -734,7 +760,43 @@ class AppDelegate: NSObject,
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
 
-        _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
+        _ = TerminalController.newTab(
+            ghostty,
+            from: window,
+            withBaseConfig: storyForgeSurfaceConfiguration(config)
+        )
+    }
+
+    /// Build the only command surface this app is allowed to launch. The Rust
+    /// binaries are copied into this location by StoryForge's bundle script.
+    private func storyForgeSurfaceConfiguration(
+        _ base: Ghostty.SurfaceConfiguration? = nil
+    ) -> Ghostty.SurfaceConfiguration {
+        var config = base ?? Ghostty.SurfaceConfiguration()
+        guard let resources = Bundle.main.resourceURL else { return config }
+
+        let appResources = resources.appendingPathComponent("storyforge", isDirectory: true)
+        let bin = appResources.appendingPathComponent("bin", isDirectory: true)
+        let tui = bin.appendingPathComponent("story-tui", isDirectory: false).path
+        let daemon = bin.appendingPathComponent("story-daemon", isDirectory: false).path
+        let storyHome = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/StoryForge", isDirectory: true)
+        let logs = storyHome.appendingPathComponent("logs", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: logs,
+            withIntermediateDirectories: true
+        )
+
+        config.command = "\(Ghostty.Shell.quote(tui)) studio"
+        config.workingDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+        config.waitAfterCommand = true
+        config.environmentVariables["STORYFORGE_HOME"] = storyHome.path
+        config.environmentVariables["STORYFORGE_DAEMON"] = daemon
+        config.environmentVariables["STORY_LOG"] = logs
+            .appendingPathComponent("studio.log", isDirectory: false)
+            .path
+        config.environmentVariables["RUST_LOG"] = "debug"
+        return config
     }
 
     private func setDockBadge() {
@@ -949,18 +1011,21 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func checkForUpdates(_ sender: Any?) {
-        updateController.checkForUpdates()
-        // UpdateSimulator.happyPath.simulate(with: updateViewModel)
+        // StoryForge pins and updates this downstream engine as source.
     }
 
     @IBAction func newWindow(_ sender: Any?) {
-        _ = TerminalController.newWindow(ghostty)
+        _ = TerminalController.newWindow(
+            ghostty,
+            withBaseConfig: storyForgeSurfaceConfiguration()
+        )
     }
 
     @IBAction func newTab(_ sender: Any?) {
         _ = TerminalController.newTab(
             ghostty,
-            from: TerminalController.preferredParent?.window
+            from: TerminalController.preferredParent?.window,
+            withBaseConfig: storyForgeSurfaceConfiguration()
         )
     }
 
@@ -974,7 +1039,7 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func showHelp(_ sender: Any) {
-        guard let url = URL(string: "https://ghostty.org/docs") else { return }
+        guard let url = URL(string: "https://github.com/ryanpedersonphotography/storyforge") else { return }
         NSWorkspace.shared.open(url)
     }
 
